@@ -466,6 +466,7 @@ body {
 
 </style>
 <script>(function(){try{var k="notebook:v1:config";var c=JSON.parse(localStorage.getItem(k)||"{}");if(!c.enabled||!c.url||!c.key){localStorage.setItem(k,JSON.stringify({enabled:true,url:"https://nlxjbeooxqovoukbdmqr.supabase.co",key:"sb_publishable_Hvf84ZCZ580Ioyq6wi6vHg_WpSF32VO",bucket:"notebook-images"}));}}catch(e){}})();</script>
+<script id="nb-snapshot">window.__NB_SNAPSHOT__={"generatedAt":"2026-10-20T05:55:27Z","imgBase":"img/","images":[],"dataUris":{},"posts":[{"id":"mvg98fr2u4egs3","title":"测试","html":"123456789","cover":null,"tags":[],"createdAt":1792474831551,"updatedAt":1792475079128,"published":true,"history":[]}]};</script>
 </head>
 <body>
 
@@ -1947,9 +1948,14 @@ body {
         ]);
         if (/<\/script/i.test(stjs + apjs)) throw new Error('脚本内容含脚本结束标签，无法安全内联');
         /* 必须用函数式替换：源码里含 $' $& 等特殊序列，字符串替换会被解释成替换模式 */
+        /* 注意：脚本正文里不能出现 "<script" 字面量，否则 HTML 解析器会进入
+           double-escaped 状态，后面的结束标签就无法结束本段脚本，整页脚本会崩。
+           所以这里一律用字符串拼接拼出标签。 */
+        const SO = '<' + 'script>';
+        const SC = '<' + '/script>';
         html = html.replace(/<link[^>]+href=["']assets\/styles\.css["'][^>]*>/, () => '<style>\n' + css + '\n</style>');
-        html = html.replace(/<script[^>]+src=["']assets\/storage\.js["']\s*><\/script>/, () => '<script>\n' + stjs + '\n<\/script>');
-        html = html.replace(/<script[^>]+src=["']assets\/app\.js["']\s*><\/script>/, () => '<script>\n' + apjs + '\n<\/script>');
+        html = html.replace(/<script[^>]+src=["']assets\/storage\.js["']\s*><\/script>/, () => SO + '\n' + stjs + '\n' + SC);
+        html = html.replace(/<script[^>]+src=["']assets\/app\.js["']\s*><\/script>/, () => SO + '\n' + apjs + '\n' + SC);
       } else {
         /* 已经跑在单文件版上：直接拿当前文档，效果等价 */
         html = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
@@ -1962,13 +1968,13 @@ body {
       /* 关键：发布的页面必须默认连云端，否则读者打开是空的（本地模式没数据） */
       const cfg = Store.getConfig();
       const inject =
-        '<script>(function(){try{var k="notebook:v1:config";' +
+        '<' + 'script>(function(){try{var k="notebook:v1:config";' +
         'var c=JSON.parse(localStorage.getItem(k)||"{}");' +
         'if(!c.enabled||!c.url||!c.key){localStorage.setItem(k,JSON.stringify({' +
         'enabled:true,url:' + JSON.stringify(cfg.url || '') +
         ',key:' + JSON.stringify(cfg.key || '') +
         ',bucket:' + JSON.stringify(cfg.bucket || 'notebook-images') +
-        '}));}}catch(e){}})();<\/script>\n';
+        '}));}}catch(e){}})();<' + '/script>\n';
       html = html.includes('</head>')
         ? html.replace('</head>', inject + '</head>')
         : inject + html;
@@ -2106,8 +2112,136 @@ body {
         const pageRes = await fetch('index.html', { cache: 'no-store' });
         if (pageRes.ok) {
           let page = await pageRes.text();
+          /* 同样不能写 "<script" 字面量（会破坏内联脚本的解析），用拼接 */
+          const OPEN = '<' + 'script id="nb-snapshot">';
           const CLOSE = '<' + '/script>';
-          const block = '<script id="nb-snapshot">window.__NB_SNAPSHOT__={"generatedAt":"2026-10-20T05:55:27Z","imgBase":"img/","images":[],"dataUris":{},"posts":[{"id":"mvg98fr2u4egs3","title":"测试","html":"123456789","cover":null,"tags":[],"createdAt":1792474831551,"updatedAt":1792475079128,"published":true,"history":[]}]};</script>
+          const block = OPEN + 'window.__NB_SNAPSHOT__=' +
+            JSON.stringify(snapshot).replace(/<\//g, '<\\/') + ';' + CLOSE + '\n';
+          const re = new RegExp('<s' + 'cript id="nb-snapshot">[\\s\\S]*?' + CLOSE, 'i');
+          page = re.test(page) ? page.replace(re, () => block) : page.replace('</head>', block + '</head>');
+          await ghPut(token, 'index.html', page, msg);
+          inlined = true;
+        }
+      } catch (e) { /* index.html 更新失败不阻断，posts.json 已生效 */ }
 
+      const kb = Math.round(JSON.stringify(snapshot).length / 1024);
+      openDialog('已同步到静态站', `
+        <p>已把 <b>${posts.length}</b> 篇已发布文章（含 ${Object.keys(dataUris).length} 张图片，共 ${kb} KB）写入公网快照${inlined ? '，并内联进页面本身' : ''}。</p>
+        <div class="tip">约 1 分钟后生效。之后读者即使访问不到云端数据库，也能看到这些文章。
+以后每次发新文章，再点一次这个按钮即可。</div>`, [
+        { text: '打开公网看看', onClick: () => window.open('https://youxiang-wanjuwu.github.io/', '_blank') },
+        { text: '好', cls: 'primary', onClick: closeDialog }
+      ]);
+    } catch (e) {
+      if (e && e.badToken) localStorage.removeItem(GH_TOKEN_KEY);
+      toast('同步失败：' + (e && e.message ? e.message : e));
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = oldText; }
+    }
+  }
+
+  function bind() {
+    $('#btnManage').onclick = () => requireAuth(() => go('#/admin'));
+    $('#btnNewPost').onclick = () => go('#/edit/' + uid());
+    $('#btnBackAdmin').onclick = () => go('#/admin');
+    $('#btnLogout').onclick = () => {
+      state.authed = false;
+      sessionStorage.removeItem('notebook:v1:auth');
+      go('#/');
+      toast('已退出');
+    };
+
+    $('#btnSiteCfg').onclick = siteDialog;
+    $('#btnPublishSite').onclick = publishSite;
+    if ($('#btnSyncStatic')) $('#btnSyncStatic').onclick = syncStaticSnapshot;
+    $('#btnCloudCfg').onclick = cloudDialog;
+    $('#btnBackup').onclick = exportBackup;
+    $('#btnRestore').onclick = () => $('#restoreInput').click();
+    $('#restoreInput').onchange = (e) => {
+      if (e.target.files[0]) importBackup(e.target.files[0]);
+      e.target.value = '';
+    };
+
+    // 编辑器
+    $('#btnSave').onclick = savePost;
+    $('#btnSaveBottom').onclick = savePost;
+    $('#btnHistory').onclick = showHistory;
+    $('#postTitle').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); $('#editor').focus(); } };
+
+    $('#toolbar').addEventListener('click', (e) => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      if (b.dataset.cmd) exec(b.dataset.cmd, b.dataset.arg);
+      else if (b.dataset.block) {
+        const v = b.dataset.block;
+        exec('formatBlock', v === 'p' ? '<p>' : '<' + v + '>');
+      }
+    });
+
+    $('#btnLink').onclick = () => {
+      const url = prompt('输入链接地址（记得带 https://）');
+      if (!url) return;
+      exec('createLink', url);
+    };
+
+    $('#btnImage').onclick = () => $('#fileInput').click();
+    $('#fileInput').onchange = (e) => { insertImages(e.target.files); e.target.value = ''; };
+
+    const ed = $('#editor');
+    ed.addEventListener('paste', (e) => {
+      const items = (e.clipboardData && e.clipboardData.items) || [];
+      const files = [];
+      for (const it of items) if (it.type && it.type.startsWith('image/')) files.push(it.getAsFile());
+      if (files.length) { e.preventDefault(); insertImages(files); }
+    });
+
+    const area = $('.editor-area');
+    ['dragenter', 'dragover'].forEach(t => area.addEventListener(t, (e) => {
+      e.preventDefault(); area.classList.add('dragover');
+    }));
+    ['dragleave', 'drop'].forEach(t => area.addEventListener(t, () => area.classList.remove('dragover')));
+    area.addEventListener('drop', (e) => {
+      e.preventDefault();
+      if (e.dataTransfer && e.dataTransfer.files.length) insertImages(e.dataTransfer.files);
+    });
+
+    ed.addEventListener('keydown', (e) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      if (e.key === 's') { e.preventDefault(); savePost(); }
+      else if (e.key === 'b') { e.preventDefault(); exec('bold'); }
+      else if (e.key === 'i') { e.preventDefault(); exec('italic'); }
+    });
+
+    // 主题
+    $('#btnTheme').onclick = () => {
+      const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+      document.documentElement.dataset.theme = next;
+      localStorage.setItem('notebook:v1:theme', next);
+    };
+
+    // 弹窗关闭
+    document.querySelectorAll('[data-close]').forEach(el => {
+      el.onclick = () => { closeDialog(); $('#lightbox').hidden = true; };
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { closeDialog(); $('#lightbox').hidden = true; }
+    });
+
+    window.addEventListener('hashchange', route);
+  }
+
+  /* =============== 启动 =============== */
+  (async function boot() {
+    const theme = localStorage.getItem('notebook:v1:theme');
+    if (theme) document.documentElement.dataset.theme = theme;
+
+    bind();
+    await Store.init();
+    await load();
+    await route();
+  })();
+})();
+
+</script>
 </body>
 </html>
