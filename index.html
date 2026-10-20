@@ -593,6 +593,7 @@ body {
   <div class="home-head">
     <h1 id="homeTitle">文章</h1>
     <p id="homeIntro"></p>
+    <div class="cat-filter-row" id="homeCats"></div>
   </div>
   <div class="post-list" id="postList"></div>
   <div class="home-empty" id="homeEmpty" hidden>
@@ -1192,7 +1193,10 @@ body {
   const state = {
     posts: [],
     current: null,     // 正在编辑的文章
-    authed: false
+    authed: false,
+    homeCat: '',       // 首页分类筛选（空=全部）
+    catFilter: '',     // 后台分类筛选
+    _selected: new Set()   // 后台批量选中的文章 id
   };
 
   /* =============== 工具 =============== */
@@ -1784,7 +1788,11 @@ body {
     renderLogo($('#siteLogo'), b);
     document.title = b.siteName || '我的文字站';
 
-    const list = state.posts.filter(p => p.published).sort((a, b) => b.updatedAt - a.updatedAt);
+    const allPublished = state.posts.filter(p => p.published)
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+    const list = state.homeCat
+      ? allPublished.filter(p => (p.category || DEFAULT_CAT) === state.homeCat)
+      : allPublished;
     const box = $('#postList');
     box.innerHTML = '';
     $('#homeEmpty').hidden = list.length > 0;
@@ -1823,6 +1831,31 @@ body {
         const im = a.querySelector('[data-cover]');
         Store.imageUrl(p.cover).then(u => { if (u) im.src = u; });
       }
+    });
+
+    renderHomeFilter(allPublished);
+  }
+
+  /* 读者侧的分类筛选条：只在真的存在多个分类时显示 */
+  function renderHomeFilter(posts) {
+    const bar = document.getElementById('homeCats');
+    if (!bar) return;
+    const cats = [...new Set(posts.map(p => p.category || DEFAULT_CAT))];
+    if (cats.length < 2) { bar.innerHTML = ''; bar.style.display = 'none'; return; }
+    bar.style.display = '';
+    const active = state.homeCat && cats.includes(state.homeCat) ? state.homeCat : '';
+    bar.innerHTML = [
+      `<button class="cat-chip ${!active ? 'active' : ''}" data-hcat="">全部<span class="cf-num">${posts.length}</span></button>`,
+      ...cats.map(c => {
+        const n = posts.filter(p => (p.category || DEFAULT_CAT) === c).length;
+        return `<button class="cat-chip ${active === c ? 'active' : ''}" data-hcat="${esc(c)}">${esc(c)}<span class="cf-num">${n}</span></button>`;
+      })
+    ].join('');
+    bar.querySelectorAll('[data-hcat]').forEach(b => {
+      b.onclick = () => {
+        state.homeCat = b.dataset.hcat;
+        renderHome();
+      };
     });
   }
 
