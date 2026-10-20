@@ -517,6 +517,7 @@ body {
     <div class="admin-actions">
       <button id="btnNewPost" class="btn primary sm">+ 写新文章</button>
       <button id="btnPublishSite" class="btn primary sm">发布到公网</button>
+      <button id="btnSyncStatic" class="btn ghost sm" title="把已发布文章写入静态快照，访问不到云端的设备也能看到">同步到静态站</button>
       <button id="btnSiteCfg" class="btn ghost sm">站点设置</button>
       <button id="btnCloudCfg" class="btn ghost sm">云端存储</button>
       <button id="btnBackup" class="btn ghost sm">导出备份</button>
@@ -843,7 +844,8 @@ body {
       this.staticMirror = ok ? {
         posts: data.posts,
         imgBase: data.imgBase || 'img/',
-        images: new Set(Array.isArray(data.images) ? data.images : [])
+        images: new Set(Array.isArray(data.images) ? data.images : []),
+        dataUris: data.dataUris || null
       } : null;
       return !!this.staticMirror;
     },
@@ -891,6 +893,7 @@ body {
 
     async imageUrl(id) {
       const m = this.staticMirror;
+      if (m && m.dataUris && m.dataUris[id]) return m.dataUris[id];
       if (m && m.images.has(id)) return m.imgBase + encodeURIComponent(id);
       const path = (this.cfg.bucket || 'notebook-images') + '/' + id;
       return this.cfg.url.replace(/\/+$/, '') + '/storage/v1/object/public/' + path;
@@ -1994,6 +1997,117 @@ body {
     }
   }
 
+  /* =============== 同步到静态站 =============== */
+  /* 把已发布文章（含图片）写成 posts.json 提交到 GitHub 仓库。
+     目的：部分网络访问不到 Supabase，读者打开页面时会回退读这份快照，
+     照样能看到文章。写的是普通文件，GitHub token 只需 repo 权限。 */
+  const GH_REPO = 'youxiang-wanjuwu/youxiang-wanjuwu.github.io';
+  const GH_TOKEN_KEY = 'notebook:v1:ghtoken';
+
+  function utf8ToB64(str) {
+    const bytes = new TextEncoder().encode(str);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(bin);
+  }
+
+  function blobToDataUri(blob) {
+    return new Promise((res, rej) => {
+      const fr = new FileReader();
+      fr.onload = () => res(fr.result);
+      fr.onerror = rej;
+      fr.readAsDataURL(blob);
+    });
+  }
+
+  async function syncStaticSnapshot() {
+    if (Store.mode !== 'cloud') {
+      toast('请先在「云端存储」里启用云端，再同步');
+      cloudDialog();
+      return;
+    }
+    let token = (localStorage.getItem(GH_TOKEN_KEY) || '').trim();
+    if (!token) {
+      const input = window.prompt(
+        '输入 GitHub token（只保存在这台设备的浏览器里，之后不再询问）\n\n' +
+        '需要：github.com → Settings → Developer settings → Personal access tokens → Tokens (classic) → 勾选 repo\n\n' +
+        '留空则取消。');
+      if (!input) return;
+      token = input.trim();
+      if (!token) return;
+      localStorage.setItem(GH_TOKEN_KEY, token);
+    }
+
+    const btn = $('#btnSyncStatic');
+    const oldText = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '同步中…'; }
+    try {
+      const all = await Store.loadAll();
+      const posts = (all.posts || []).filter(p => p.published);
+
+      /* 图片转成 data URI 一起写进去，避免读者设备加载不了云端图片 */
+      const ids = new Set();
+      posts.forEach(p => {
+        if (p.cover) ids.add(p.cover);
+        (p.html || '').replace(/data-img-id="([^"]+)"/g, (_, id) => { ids.add(id); return _; });
+      });
+      const dataUris = {};
+      for (const id of ids) {
+        try {
+          const blob = await Store.imageBlob(id);
+          if (blob) dataUris[id] = await blobToDataUri(blob);
+        } catch (e) { /* 单个图片失败不影响整体 */ }
+      }
+
+      const snapshot = {
+        generatedAt: new Date().toISOString(),
+        imgBase: 'img/',
+        images: [],
+        dataUris,
+        posts
+      };
+
+      const api = 'https://api.github.com/repos/' + GH_REPO + '/contents/posts.json';
+      const headers = {
+        'Authorization': 'Bearer ' + token,
+        'Accept': 'application/vnd.github+json',
+        'Content-Type': 'application/json'
+      };
+      let sha = null;
+      const cur = await fetch(api, { headers });
+      if (cur.ok) { const j = await cur.json(); sha = j.sha || null; }
+
+      const body = {
+        message: '同步文章快照 ' + new Date().toISOString(),
+        content: utf8ToB64(JSON.stringify(snapshot)),
+        branch: 'main'
+      };
+      if (sha) body.sha = sha;
+
+      const res = await fetch(api, { method: 'PUT', headers, body: JSON.stringify(body) });
+      if (res.status === 401 || res.status === 403) {
+        localStorage.removeItem(GH_TOKEN_KEY);
+        throw new Error('GitHub 拒绝了这个 token（需要 repo 权限，或已过期）。请重新生成一个再试。');
+      }
+      if (!res.ok) throw new Error('GitHub 返回 ' + res.status + '：' + (await res.text()).slice(0, 200));
+
+      const kb = Math.round(JSON.stringify(snapshot).length / 1024);
+      openDialog('已同步到静态站', `
+        <p>已把 <b>${posts.length}</b> 篇已发布文章（含 ${Object.keys(dataUris).length} 张图片，共 ${kb} KB）写入公网快照。</p>
+        <div class="tip">约 1 分钟后生效。之后读者即使访问不到云端数据库，也能看到这些文章。
+以后每次发新文章，再点一次这个按钮即可。</div>`, [
+        { text: '打开公网看看', onClick: () => window.open('https://youxiang-wanjuwu.github.io/', '_blank') },
+        { text: '好', cls: 'primary', onClick: closeDialog }
+      ]);
+    } catch (e) {
+      toast('同步失败：' + (e && e.message ? e.message : e));
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = oldText; }
+    }
+  }
+
   function bind() {
     $('#btnManage').onclick = () => requireAuth(() => go('#/admin'));
     $('#btnNewPost').onclick = () => go('#/edit/' + uid());
@@ -2007,6 +2121,7 @@ body {
 
     $('#btnSiteCfg').onclick = siteDialog;
     $('#btnPublishSite').onclick = publishSite;
+    if ($('#btnSyncStatic')) $('#btnSyncStatic').onclick = syncStaticSnapshot;
     $('#btnCloudCfg').onclick = cloudDialog;
     $('#btnBackup').onclick = exportBackup;
     $('#btnRestore').onclick = () => $('#restoreInput').click();
