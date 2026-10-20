@@ -764,44 +764,51 @@ body {
     }
   }
 
-  /* ---------------- IndexedDB 封装（存图片二进制） ---------------- */
+  /* ---------------- IndexedDB 封装 ----------------
+     images   图片二进制
+     articles 文章正文（localStorage 只有 ~5MB，长篇小说几篇就撑爆，正文必须放这里） */
   const idb = {
     _db: null,
     open() {
       if (this._db) return Promise.resolve(this._db);
+      if (typeof indexedDB === 'undefined') return Promise.reject(new Error('当前环境没有 IndexedDB'));
       return new Promise((resolve, reject) => {
-        const req = indexedDB.open(NS, 1);
+        const req = indexedDB.open(NS, 2);
         req.onupgradeneeded = () => {
           const db = req.result;
           if (!db.objectStoreNames.contains('images')) db.createObjectStore('images');
+          if (!db.objectStoreNames.contains('articles')) db.createObjectStore('articles');
         };
         req.onsuccess = () => { this._db = req.result; resolve(this._db); };
         req.onerror = () => reject(req.error);
       });
     },
-    async put(key, val) {
+    async put(key, val, store) {
       const db = await this.open();
+      const name = store || 'images';
       return new Promise((resolve, reject) => {
-        const tx = db.transaction('images', 'readwrite');
-        tx.objectStore('images').put(val, key);
+        const tx = db.transaction(name, 'readwrite');
+        tx.objectStore(name).put(val, key);
         tx.oncomplete = resolve;
         tx.onerror = () => reject(tx.error);
       });
     },
-    async get(key) {
+    async get(key, store) {
       const db = await this.open();
+      const name = store || 'images';
       return new Promise((resolve, reject) => {
-        const tx = db.transaction('images', 'readonly');
-        const r = tx.objectStore('images').get(key);
+        const tx = db.transaction(name, 'readonly');
+        const r = tx.objectStore(name).get(key);
         r.onsuccess = () => resolve(r.result);
         r.onerror = () => reject(r.error);
       });
     },
-    async del(key) {
+    async del(key, store) {
       const db = await this.open();
+      const name = store || 'images';
       return new Promise((resolve, reject) => {
-        const tx = db.transaction('images', 'readwrite');
-        tx.objectStore('images').delete(key);
+        const tx = db.transaction(name, 'readwrite');
+        tx.objectStore(name).delete(key);
         tx.oncomplete = resolve;
         tx.onerror = () => reject(tx.error);
       });
@@ -816,20 +823,56 @@ body {
 
     async init() { return true; },
 
-    async loadAll() { return { posts: readLS(LS_POSTS, []) }; },
-
-    async getPost(id) { return readLS(LS_POSTS, []).find(p => p.id === id) || null; },
+    async loadAll() {
+      const posts = readLS(LS_POSTS, []);
+      /* 老数据兼容：正文原本存在 localStorage 里，这里顺手挪进 IndexedDB，
+         只留索引。IndexedDB 不可用（如某些隐私模式）时保持原样，功能不受影响。 */
+      let migrated = false;
+      for (const p of posts) {
+        if (typeof p.html === 'string') {
+          try {
+            await idb.put(p.id, p.html, 'articles');
+            delete p.html;
+            migrated = true;
+          } catch (e) { /* 没有 IDB 就留在 localStorage */ }
+        }
+      }
+      if (migrated) writeLS(LS_POSTS, posts);
+      return { posts };
+    },
 
     async putPost(post) {
       const posts = readLS(LS_POSTS, []);
-      const i = posts.findIndex(p => p.id === post.id);
-      if (i >= 0) posts[i] = post; else posts.unshift(post);
-      /* 写不进去必须抛错，否则调用方会误以为保存成功（长文更容易撑爆 5MB 配额） */
-      if (!writeLS(LS_POSTS, posts, true)) throw new Error('本机浏览器存储空间不足（localStorage 上限约 5MB，长文+图片很容易超）。请改用云端存储，或先删掉一些旧文章/大图。');
+      const lean = Object.assign({}, post);
+      /* 正文进 IndexedDB（容量几百 MB）；localStorage 只存索引，
+         这样长篇小说再多也不会撞 5MB 上限 */
+      if (typeof lean.html === 'string') {
+        try {
+          await idb.put(lean.id, lean.html, 'articles');
+          delete lean.html;
+        } catch (e) { /* 没有 IDB 时保留正文，老行为 */ }
+      }
+      const i = posts.findIndex(p => p.id === lean.id);
+      if (i >= 0) posts[i] = lean; else posts.unshift(lean);
+      /* 写不进去必须抛错，否则调用方会误以为保存成功 */
+      if (!writeLS(LS_POSTS, posts, true)) throw new Error('本机浏览器存储空间不足。请改用云端存储，或先删掉一些旧文章；也可以点「导出备份」把内容存到硬盘上。');
+    },
+
+    async getPost(id) {
+      const meta = readLS(LS_POSTS, []).find(p => p.id === id) || null;
+      if (!meta) return null;
+      if (typeof meta.html !== 'string') {
+        try {
+          const html = await idb.get(id, 'articles');
+          if (typeof html === 'string') meta.html = html;
+        } catch (e) { /* 没有 IDB：保持无正文，由上层下载/提示 */ }
+      }
+      return meta;
     },
 
     async removePost(id) {
       writeLS(LS_POSTS, readLS(LS_POSTS, []).filter(p => p.id !== id));
+      try { await idb.del(id, 'articles'); } catch (e) { /* 忽略 */ }
     },
 
     async putImage(id, blob) {
@@ -1363,11 +1406,11 @@ body {
       if (art && typeof art.html === 'string') html = art.html;
     } catch (e) { /* 离线且未缓存，走下一步 */ }
 
-    if (!html && Store.mode === 'cloud') {
+    if (!html) {
       try {
         const full = await Store.getPost(p.id);
         if (full && typeof full.html === 'string') html = full.html;
-      } catch (e) { /* 云端也不可达，交给调用方提示 */ }
+      } catch (e) { /* 本地 / 云端都不可达，交给调用方提示 */ }
     }
 
     if (html) {
@@ -1515,15 +1558,27 @@ body {
      保证用户写了几万字的长文不会因为一次网络抖动整篇丢掉。
      返回 'cloud' | 'local'，方便调用方提示用户。 */
   async function persistPost(post) {
-    try {
-      await Store.putPost(post);
-      return Store.mode;
-    } catch (e) {
-      if (Store.mode !== 'cloud' || !isNetworkError(e)) throw e;
-      await ensureUsableMode();                     /* 切到本机 + 补快照文章 */
-      await Store.putPost(post);
-      return 'local';
+    /* 云端瞬时抖动（TLS 重置、超时、5xx）先退避重试两次，别第一次失败就往本机退；
+       三次都不通才判定"这台设备连不上云端"，切本机继续存 —— 内容一律不丢。 */
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await Store.putPost(post);
+        return Store.mode;
+      } catch (e) {
+        if (!isNetworkError(e)) throw e;
+        if (attempt < 2) {
+          await new Promise(r => setTimeout(r, 400 * Math.pow(2, attempt)));
+          continue;
+        }
+        if (Store.mode === 'cloud') {
+          await ensureUsableMode();                  /* 切到本机 + 补快照文章 */
+          await Store.putPost(post);
+          return 'local';
+        }
+        throw e;
+      }
     }
+    return Store.mode;
   }
 
   /* 本机已保存令牌且仍然有效 → 免密登录 */
