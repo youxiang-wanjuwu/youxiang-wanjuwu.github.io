@@ -834,6 +834,22 @@ body {
       return true;
     },
 
+    /* 静态镜像：托管页面旁的 posts.json / img/ 目录（GitHub Pages 提供）。
+       有些网络访问不到 Supabase，这时用它兜底，读者依然能看到文章。 */
+    staticMirror: null,
+
+    setStaticMirror(data) {
+      const ok = data && Array.isArray(data.posts) && data.posts.length > 0;
+      this.staticMirror = ok ? {
+        posts: data.posts,
+        imgBase: data.imgBase || 'img/',
+        images: new Set(Array.isArray(data.images) ? data.images : [])
+      } : null;
+      return !!this.staticMirror;
+    },
+
+    hasStatic() { return !!(this.staticMirror && this.staticMirror.posts.length); },
+
     async loadAll() {
       const posts = await this._json('/rest/v1/nb_posts?select=*&order=updatedAt.desc');
       return { posts: posts || [] };
@@ -874,6 +890,8 @@ body {
     },
 
     async imageUrl(id) {
+      const m = this.staticMirror;
+      if (m && m.images.has(id)) return m.imgBase + encodeURIComponent(id);
       const path = (this.cfg.bucket || 'notebook-images') + '/' + id;
       return this.cfg.url.replace(/\/+$/, '') + '/storage/v1/object/public/' + path;
     },
@@ -951,6 +969,9 @@ body {
     },
 
     async loadAll() { return this.impl.loadAll(); },
+    setStaticMirror(d) { return CloudStore.setStaticMirror(d); },
+    hasStatic() { return CloudStore.hasStatic(); },
+    staticPosts() { const m = CloudStore.staticMirror; return m ? m.posts : []; },
     async putPost(p) { return this.impl.putPost(p); },
     async removePost(id) { return this.impl.removePost(id); },
     async putImage(id, blob) { return this.impl.putImage(id, blob); },
@@ -1317,6 +1338,13 @@ body {
       warn.style.borderColor = '#ff6b6b';
       warn.textContent = state.loadError;
       box.appendChild(warn);
+    } else if (state.fromMirror) {
+      const tip = document.createElement('div');
+      tip.className = 'tip';
+      tip.style.margin = '0 0 16px';
+      tip.style.opacity = '.7';
+      tip.textContent = '当前显示的是站点内置快照，联网后会自动更新为最新内容。';
+      box.appendChild(tip);
     }
 
     list.forEach(p => {
@@ -1822,16 +1850,45 @@ body {
   }
 
   /* =============== 载入 =============== */
+  /* 静态快照：托管页面同目录下的 posts.json（由 GitHub Actions 定时从云端同步）。
+     先读它，读者在任何网络下都能立刻看到文章；随后再拉云端拿最新版本。 */
+  async function loadStaticMirror() {
+    try {
+      const res = await fetch('posts.json?t=' + Date.now(), { cache: 'no-store' });
+      if (!res.ok) return false;
+      const data = await res.json();
+      return Store.setStaticMirror(data);
+    } catch (e) { return false; }
+  }
+
   async function load() {
+    state.fromMirror = false;
+    state.loadError = '';
+    state.posts = [];
+
+    /* 1) 静态快照（不依赖 Supabase） */
+    if (await loadStaticMirror()) {
+      state.posts = Store.staticPosts();
+      state.fromMirror = true;
+    }
+
+    /* 2) 云端最新（能连上就以云端为准） */
     try {
       const data = await Store.loadAll();
-      state.posts = data.posts || [];
-      state.loadError = '';
+      if (data.posts && data.posts.length) {
+        state.posts = data.posts;
+        state.fromMirror = false;
+      } else if (!state.posts.length) {
+        state.posts = [];
+      }
     } catch (e) {
-      state.posts = [];
-      state.loadError = '读取云端失败：' + (e && e.message ? e.message : e) +
-        '。文章本身没丢，通常是这台设备的网络访问不到 Supabase（换网络试试，或进后台看「云端存储」状态）。';
       console.error(e);
+      if (state.posts.length) {
+        state.loadError = '';   // 已有静态快照可看，不打扰读者
+      } else {
+        state.loadError = '读取云端失败：' + (e && e.message ? e.message : e) +
+          '。文章本身没丢，通常是这台设备的网络访问不到 Supabase（换网络试试，或进后台看「云端存储」状态）。';
+      }
     }
   }
 
