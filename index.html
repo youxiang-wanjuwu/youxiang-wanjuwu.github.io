@@ -1825,18 +1825,18 @@ body {
     openDialog('你的公网地址', `
       <p>读者打开这个地址就能看到你的文字站：</p>
       <div class="field">
-        <input id="pubUrl" value="https://zhouzenrao-dotcom.github.io/notebook-site/" readonly onclick="this.select()">
+        <input id="pubUrl" value="https://youxiang-wanjuwu.github.io/" readonly onclick="this.select()">
       </div>
       <div class="tip">文章内容存在云端数据库里：你在后台保存文章后，读者刷新就能看到，不需要重新发布。
 只有当我改了站点功能时，才会重新推送一次站点（GitHub Pages 会自动更新）。</div>`, [
       {
         text: '复制地址', onClick: async () => {
-          const u = 'https://zhouzenrao-dotcom.github.io/notebook-site/';
+          const u = 'https://youxiang-wanjuwu.github.io/';
           try { await navigator.clipboard.writeText(u); toast('已复制'); }
           catch (e) { $('#pubUrl').select(); toast('请按 Ctrl+C 复制'); }
         }
       },
-      { text: '打开看看', onClick: () => window.open('https://zhouzenrao-dotcom.github.io/notebook-site/', '_blank') },
+      { text: '打开看看', onClick: () => window.open('https://youxiang-wanjuwu.github.io/', '_blank') },
       { text: '关闭', cls: 'primary', onClick: closeDialog }
     ]);
     return;
