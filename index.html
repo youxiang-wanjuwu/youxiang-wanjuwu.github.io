@@ -466,8 +466,7 @@ body {
 
 </style>
 <script>(function(){try{var k="notebook:v1:config";var c=JSON.parse(localStorage.getItem(k)||"{}");if(!c.enabled||!c.url||!c.key){localStorage.setItem(k,JSON.stringify({enabled:true,url:"https://nlxjbeooxqovoukbdmqr.supabase.co",key:"sb_publishable_Hvf84ZCZ580Ioyq6wi6vHg_WpSF32VO",bucket:"notebook-images"}));}}catch(e){}})();</script>
-<script id="nb-snapshot">window.__NB_SNAPSHOT__={"generatedAt":"2026-10-20T06:11:30.039Z","imgBase":"img/","images":[],"dataUris":{},"posts":[{"id":"mvg98fr2u4egs3","title":"测试","html":"123456789","cover":null,"tags":[],"createdAt":1792474831551,"updatedAt":1792475079128,"published":true,"history":[]}]};</script>
-
+<script id="nb-snapshot">window.__NB_SNAPSHOT__={"generatedAt":"2026-10-20T05:55:27Z","imgBase":"img/","images":[],"dataUris":{},"posts":[{"id":"mvg98fr2u4egs3","title":"测试","html":"123456789","cover":null,"tags":[],"createdAt":1792474831551,"updatedAt":1792475079128,"published":true,"history":[]}]};</script>
 </head>
 <body>
 
@@ -1205,6 +1204,83 @@ body {
     return false;
   }
 
+  /* =============== GitHub 令牌登录 ===============
+     有些网络访问不到 Supabase（登不上、也写不了库）。这条通道只用 GitHub：
+     校验令牌归属 → 文章存本机 → 点「同步到静态站」直接写进 GitHub 仓库。 */
+  const GH_OWNER = 'youxiang-wanjuwu';
+
+  async function importSnapshotToLocal() {
+    if (Store.mode !== 'local') return 0;
+    const snap = window.__NB_SNAPSHOT__;
+    if (!snap || !snap.posts || !snap.posts.length) return 0;
+    const cur = (await Store.loadAll()).posts || [];
+    const map = new Map(cur.map(p => [p.id, p]));
+    let n = 0;
+    for (const p of snap.posts) {
+      const old = map.get(p.id);
+      /* 只补新的、更新的，别覆盖本机刚写的草稿 */
+      if (!old || (p.updatedAt || 0) > (old.updatedAt || 0)) { await Store.putPost(p); n++; }
+    }
+    return n;
+  }
+
+  /* 云端连不上时自动切到本机模式，避免每一步保存都报错 */
+  async function ensureUsableMode() {
+    if (Store.mode !== 'cloud') { await importSnapshotToLocal(); return; }
+    try {
+      await Store.test();
+      return;
+    } catch (e) {
+      await Store.switchTo('local');
+      await importSnapshotToLocal();
+    }
+  }
+
+  /* 本机已保存令牌且仍然有效 → 免密登录 */
+  async function trySavedGithubLogin() {
+    const t = (localStorage.getItem(GH_TOKEN_KEY) || '').trim();
+    if (!t) return false;
+    try {
+      const res = await fetch('https://api.github.com/user', {
+        headers: { 'Authorization': 'Bearer ' + t, 'Accept': 'application/vnd.github+json' }
+      });
+      if (!res.ok) return false;
+      const u = await res.json();
+      if (u.login && u.login !== GH_OWNER) return false;
+      state.authed = true;
+      sessionStorage.setItem('notebook:v1:auth', '1');
+      return true;
+    } catch (e) { return false; }
+  }
+
+  async function githubLogin(onOk) {
+    const input = window.prompt(
+      '粘贴 GitHub 令牌（ghp_ 开头，勾选 repo 权限生成的那种）\n\n' +
+      '适用于这台设备访问不到 Supabase 的情况：登录后文章保存在本机，\n' +
+      '点「同步到静态站」直接写进 GitHub，读者即可看到。\n\n留空取消。');
+    if (!input) return;
+    const token = input.trim();
+    if (!token) return;
+    try {
+      const res = await fetch('https://api.github.com/user', {
+        headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json' }
+      });
+      if (!res.ok) throw new Error('GitHub 不接受这个令牌（' + res.status + '）');
+      const u = await res.json();
+      if (u.login && u.login !== GH_OWNER) throw new Error('这个令牌属于 ' + u.login + '，不是本站所有者');
+      localStorage.setItem(GH_TOKEN_KEY, token);
+      state.authed = true;
+      sessionStorage.setItem('notebook:v1:auth', '1');
+      closeDialog();
+      await ensureUsableMode();
+      await load();
+      toast('已登录（GitHub 令牌）');
+      onOk();
+    } catch (e) {
+      toast('登录失败：' + (e && e.message ? e.message : e));
+    }
+  }
+
   async function askPassword(onOk) {
     if (Store.mode === 'cloud') {
       openDialog('管理员登录', `
@@ -1217,8 +1293,11 @@ body {
           <label>密码</label>
           <input id="admPw" type="password" autocomplete="current-password">
         </div>
-        <div class="hint" id="admErr"></div>`, [
+        <div class="hint" id="admErr"></div>
+        <div class="tip">如果这台设备连不上 Supabase（登录一直失败），改用「GitHub 令牌登录」，
+只需要能打开 GitHub，文章会直接写进站点仓库。</div>`, [
         { text: '取消', onClick: closeDialog },
+        { text: 'GitHub 令牌登录', onClick: () => githubLogin(onOk) },
         {
           text: '登录', cls: 'primary', onClick: async () => {
             const email = $('#admEmail').value.trim(), pw = $('#admPw').value;
@@ -1298,7 +1377,14 @@ body {
 
   function requireAuth(then) {
     if (isAuthed()) { then(); return; }
-    askPassword(then);
+    /* 这台设备存过 GitHub 令牌：直接放行，不用每次都输密码 */
+    trySavedGithubLogin().then(ok => {
+      if (ok) {
+        ensureUsableMode().then(() => load()).then(then);
+        return;
+      }
+      askPassword(then);
+    });
   }
 
   /* =============== 视图切换与路由 =============== */
@@ -2056,12 +2142,24 @@ body {
     });
   }
 
+  /* 读取 GitHub 上已有的快照（base64） */
+  async function ghGetSnapshot(token) {
+    try {
+      const api = 'https://api.github.com/repos/' + GH_REPO + '/contents/posts.json';
+      const r = await fetch(api, {
+        headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json' }
+      });
+      if (!r.ok) return null;
+      const j = await r.json();
+      const b64 = (j.content || '').replace(/\s/g, '');
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return JSON.parse(new TextDecoder().decode(bytes));
+    } catch (e) { return null; }
+  }
+
   async function syncStaticSnapshot() {
-    if (Store.mode !== 'cloud') {
-      toast('请先在「云端存储」里启用云端，再同步');
-      cloudDialog();
-      return;
-    }
     let token = (localStorage.getItem(GH_TOKEN_KEY) || '').trim();
     if (!token) {
       const input = window.prompt(
@@ -2078,21 +2176,40 @@ body {
     const oldText = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = '同步中…'; }
     try {
-      const all = await Store.loadAll();
-      const posts = (all.posts || []).filter(p => p.published);
+      /* 本机文章（云端连不上时退回页面自带的快照） */
+      let mine = [];
+      try { mine = (await Store.loadAll()).posts || []; }
+      catch (e) { mine = state.posts || []; }
+      mine = mine.filter(p => p.published);
 
-      /* 图片转成 data URI 一起写进去，避免读者设备加载不了云端图片 */
+      /* 先取 GitHub 上已有的快照，再合并：避免覆盖别的设备发过的文章 */
+      const remote = await ghGetSnapshot(token);
+      const merged = new Map();
+      ((remote && remote.posts) || []).forEach(p => merged.set(p.id, p));
+      mine.forEach(p => {
+        const old = merged.get(p.id);
+        if (!old || (p.updatedAt || 0) >= (old.updatedAt || 0)) merged.set(p.id, p);
+      });
+      const posts = [...merged.values()].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+
+      /* 图片转 data URI 写进去，避免读者设备加载不了云端图片；远端已有的不重复取 */
       const ids = new Set();
       posts.forEach(p => {
         if (p.cover) ids.add(p.cover);
         (p.html || '').replace(/data-img-id="([^"]+)"/g, (_, id) => { ids.add(id); return _; });
       });
-      const dataUris = {};
+      const dataUris = Object.assign({}, (remote && remote.dataUris) || {});
       for (const id of ids) {
+        if (dataUris[id]) continue;
         try {
           const blob = await Store.imageBlob(id);
           if (blob) dataUris[id] = await blobToDataUri(blob);
         } catch (e) { /* 单个图片失败不影响整体 */ }
+      }
+
+      /* 合并结果写回本机，保证这台设备上的列表也是最新的 */
+      if (Store.mode === 'local') {
+        for (const p of posts) await Store.putPost(p);
       }
 
       const snapshot = {
