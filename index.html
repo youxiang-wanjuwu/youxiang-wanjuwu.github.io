@@ -1310,6 +1310,15 @@ body {
     $('#homeEmpty').hidden = list.length > 0;
     $('#homeIntro').textContent = s.intro || '';
 
+    if (state.loadError) {
+      const warn = document.createElement('div');
+      warn.className = 'tip';
+      warn.style.margin = '0 0 16px';
+      warn.style.borderColor = '#ff6b6b';
+      warn.textContent = state.loadError;
+      box.appendChild(warn);
+    }
+
     list.forEach(p => {
       const a = document.createElement('a');
       a.className = 'post-card';
@@ -1814,8 +1823,16 @@ body {
 
   /* =============== 载入 =============== */
   async function load() {
-    const data = await Store.loadAll();
-    state.posts = data.posts || [];
+    try {
+      const data = await Store.loadAll();
+      state.posts = data.posts || [];
+      state.loadError = '';
+    } catch (e) {
+      state.posts = [];
+      state.loadError = '读取云端失败：' + (e && e.message ? e.message : e) +
+        '。文章本身没丢，通常是这台设备的网络访问不到 Supabase（换网络试试，或进后台看「云端存储」状态）。';
+      console.error(e);
+    }
   }
 
   /* =============== 事件绑定 =============== */
